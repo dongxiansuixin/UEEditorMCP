@@ -177,6 +177,18 @@ void UMCPBridge::RegisterActions()
 	ActionHandlers.Add(TEXT("call_blueprint_function"), MakeShared<FCallBlueprintFunctionAction>());
 
 	// =========================================================================
+	// Node Actions - Async Action Nodes (Third-party plugin support)
+	// =========================================================================
+	ActionHandlers.Add(TEXT("add_async_action_node"), MakeShared<FAddAsyncActionNodeAction>());
+
+	// =========================================================================
+	// Self-Evolution: Dynamic Node Discovery & Creation
+	// =========================================================================
+	ActionHandlers.Add(TEXT("search_catalog"), MakeShared<FSearchCatalogAction>());
+	ActionHandlers.Add(TEXT("add_generic_node"), MakeShared<FAddGenericNodeAction>());
+	ActionHandlers.Add(TEXT("suggest_next"), MakeShared<FSuggestNextAction>());
+
+	// =========================================================================
 	// Node Actions - External Object Property Nodes
 	// =========================================================================
 	ActionHandlers.Add(TEXT("set_object_property"), MakeShared<FSetObjectPropertyAction>());
@@ -287,6 +299,9 @@ void UMCPBridge::RegisterActions()
 	ActionHandlers.Add(TEXT("mvvm_get_bindings"), MakeShared<FMVVMGetBindingsAction>());
 	ActionHandlers.Add(TEXT("mvvm_remove_binding"), MakeShared<FMVVMRemoveBindingAction>());
 	ActionHandlers.Add(TEXT("mvvm_remove_viewmodel"), MakeShared<FMVVMRemoveViewModelAction>());
+
+	// Widget Is Variable
+	ActionHandlers.Add(TEXT("set_widget_is_variable"), MakeShared<FSetWidgetIsVariableAction>());
 
 	// =========================================================================
 	// Material Actions (Materials, Shaders, Post-Process)

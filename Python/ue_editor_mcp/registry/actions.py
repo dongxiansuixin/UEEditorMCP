@@ -32,6 +32,9 @@ def register_all_actions(registry: ActionRegistry) -> None:
     registry.register_many(_MATERIAL_ACTIONS)
     registry.register_many(_WIDGET_ACTIONS)
     registry.register_many(_INPUT_ACTIONS)
+    registry.register_many(_ASYNC_ACTION_ACTIONS)
+    registry.register_many(_WIDGET_VARIABLE_ACTIONS)
+    registry.register_many(_SELF_EVOLUTION_ACTIONS)
 
 
 # =========================================================================
@@ -2031,11 +2034,14 @@ _GRAPH_ACTIONS = [
                         "properties": {
                             "op": {"type": "string", "enum": ["add_node", "remove_node", "set_node_property", "connect", "disconnect", "add_variable", "set_variable_default", "set_pin_default"]},
                             "id": {"type": "string", "description": "(add_node) Temp ID for referencing within this patch"},
-                            "node_type": {"type": "string", "description": "(add_node) Event, CustomEvent, FunctionCall, Branch, VariableGet, VariableSet, Cast, Self, Reroute, MacroInstance"},
+                            "node_type": {"type": "string", "description": "(add_node) Event, CustomEvent, FunctionCall, Branch, VariableGet, VariableSet, Cast, Self, Reroute, MacroInstance, CreateDelegate, Delay, CreateWidget, InputAction, FormatText, SpawnActorFromClass"},
                             "event_name": {"type": "string", "description": "(add_node/Event) Event name e.g. BeginPlay"},
                             "function_name": {"type": "string", "description": "(add_node/FunctionCall) Function name"},
                             "target_class": {"type": "string", "description": "(add_node/FunctionCall) Owning class (self, GameplayStatics, Math, etc.)"},
                             "variable_name": {"type": "string", "description": "(add_node/VariableGet|Set) Variable name"},
+                            "action_name": {"type": "string", "description": "(add_node/InputAction) Input action name"},
+                            "class_name": {"type": "string", "description": "(add_node/CreateWidget|SpawnActorFromClass) Class path e.g. /Game/UI/WBP_HUD.WBP_HUD_C"},
+                            "duration": {"type": "number", "description": "(add_node/Delay) Delay duration in seconds"},
                             "defaults": {"type": "object", "description": "(add_node/FunctionCall) Pin default values {pin_name: value}"},
                             "node": {"type": "string", "description": "(various ops) Node reference: temp ID, GUID, or $last_node"},
                             "from": {"type": "object", "description": "(connect) {node, pin}"},
@@ -2724,7 +2730,8 @@ _WIDGET_ACTIONS = [
                 "position": {"type": "array", "items": {"type": "number"}, "description": "[X, Y]"},
                 "size": {"type": "array", "items": {"type": "number"}, "description": "[Width, Height]"},
                 "font_size": {"type": "integer", "description": "Font size"},
-                "color": {"type": "array", "items": {"type": "number"}, "description": "[R, G, B, A]"}
+                "color": {"type": "array", "items": {"type": "number"}, "description": "[R, G, B, A]"},
+                "parent": {"type": "string", "description": "Optional parent container name. If provided, widget is added as child of this container instead of root canvas."}
             },
             "required": ["widget_name", "component_type", "component_name"]
         },
@@ -2818,7 +2825,12 @@ _WIDGET_ACTIONS = [
                 "is_enabled": {"type": "boolean", "description": "Whether widget is enabled"},
                 "h_align": {"type": "string", "description": "Horizontal alignment: Fill, Left, Center, Right"},
                 "v_align": {"type": "string", "description": "Vertical alignment: Fill, Top, Center, Bottom"},
-                "padding": {"type": "array", "items": {"type": "number"}, "description": "[Left, Top, Right, Bottom]"}
+                "padding": {"type": "array", "items": {"type": "number"}, "description": "[Left, Top, Right, Bottom]"},
+                "anchors": {"type": "array", "items": {"type": "number"}, "description": "[MinX, MinY, MaxX, MaxY] CanvasPanel anchors (0-1). Presets: [0,0,0,0]=TopLeft, [0.5,0.5,0.5,0.5]=Center, [0,0,1,1]=Stretch"},
+                "alignment": {"type": "array", "items": {"type": "number"}, "description": "[X, Y] alignment pivot (0-1). E.g. [0.5, 0.5] for center"},
+                "auto_size": {"type": "boolean", "description": "Enable auto-size for CanvasPanel slot (overrides explicit size)"},
+                "z_order": {"type": "integer", "description": "Z-order in CanvasPanel (higher = on top)"},
+                "size_rule": {"type": "string", "enum": ["Auto", "Fill"], "description": "Size rule for VerticalBox/HorizontalBox slots"}
             },
             "required": ["widget_name", "target"]
         },
@@ -3123,5 +3135,197 @@ _INPUT_ACTIONS = [
             },
             "required": ["context_name", "action_name", "key"]
         },
+    ),
+]
+
+
+# =========================================================================
+# Widget Is Variable
+# =========================================================================
+_WIDGET_VARIABLE_ACTIONS = [
+    ActionDef(
+        id="widget.set_is_variable",
+        command="set_widget_is_variable",
+        tags=("widget", "umg", "variable", "is_variable", "promote"),
+        description="Set bIsVariable on a widget component, enabling it to be referenced in Blueprint graphs.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "widget_name": {"type": "string", "description": "Name of the Widget Blueprint"},
+                "target": {"type": "string", "description": "Widget component name to set as variable"},
+                "is_variable": {"type": "boolean", "description": "true to mark as variable (default true)"}
+            },
+            "required": ["widget_name", "target"]
+        },
+        examples=(
+            {"widget_name": "WBP_Weather", "target": "TempText"},
+            {"widget_name": "WBP_HUD", "target": "HealthBar", "is_variable": False},
+        ),
+    ),
+]
+
+
+# =========================================================================
+# Async Action Nodes (Third-party plugin support: UForge HTTP, etc.)
+# =========================================================================
+_ASYNC_ACTION_ACTIONS = [
+    ActionDef(
+        id="node.add_async_action",
+        command="add_async_action_node",
+        tags=("node", "async", "action", "latent", "third-party", "uforge", "http"),
+        description="Add an async action node (UK2Node_AsyncAction) by class name. Supports any UBlueprintAsyncActionBase subclass including third-party plugins like UForge HTTP & JSON Utility.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "blueprint_name": {"type": "string", "description": "Name of the target Blueprint"},
+                "class_name": {"type": "string", "description": "C++ class name of the async action (e.g. 'HTTPProxyAsync', 'DownloadImage'). Supports fuzzy matching."},
+                "factory_function": {"type": "string", "description": "Factory function name (auto-detected if omitted)"},
+                "node_position": {"type": "array", "items": {"type": "number"}, "description": "[X, Y] position"},
+                "graph_name": {"type": "string", "description": "Target graph (default: EventGraph)"},
+                "pin_defaults": {"type": "object", "description": "Object mapping pin_name -> default_value string"}
+            },
+            "required": ["blueprint_name", "class_name"]
+        },
+        examples=(
+            {"blueprint_name": "WBP_Weather", "class_name": "HTTPProxyAsync", "node_position": [500, 0]},
+            {"blueprint_name": "BP_Player", "class_name": "DownloadImage", "node_position": [300, 0]},
+        ),
+    ),
+]
+
+
+# =========================================================================
+# Self-Evolution: Dynamic Node Discovery & Creation
+# =========================================================================
+_SELF_EVOLUTION_ACTIONS = [
+    ActionDef(
+        id="node.search_catalog",
+        command="search_catalog",
+        tags=("node", "search", "catalog", "discover", "browse", "action", "database", "self-evolution"),
+        description=(
+            "Search the Blueprint action catalog for available nodes. "
+            "Queries UE's FBlueprintActionDatabase to discover ALL registered Blueprint actions "
+            "(engine functions, third-party plugins, project functions, etc.). "
+            "Returns spawner_id that can be used with node.add_generic to create any node."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "Search term (min 2 chars). Matches against action name, category, and keywords.",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Optional category filter to narrow results (e.g. 'Math', 'String', 'HTTP').",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max results to return (default: 50, max: 200).",
+                },
+            },
+            "required": ["keyword"],
+        },
+        examples=(
+            {"keyword": "Print String"},
+            {"keyword": "HTTP", "max_results": 20},
+            {"keyword": "Get", "category": "Math", "max_results": 10},
+            {"keyword": "TryGet", "max_results": 30},
+        ),
+    ),
+    ActionDef(
+        id="node.add_generic",
+        command="add_generic_node",
+        tags=("node", "add", "generic", "create", "spawn", "universal", "self-evolution"),
+        description=(
+            "Create ANY Blueprint node using a spawner_id from node.search_catalog or node.suggest_next. "
+            "This is the universal node creator — can spawn function calls, events, macros, "
+            "async actions, struct operations, and any third-party plugin node."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "blueprint_name": {
+                    "type": "string",
+                    "description": "Name of the target Blueprint",
+                },
+                "spawner_id": {
+                    "type": "string",
+                    "description": "Spawner ID obtained from node.search_catalog or node.suggest_next",
+                },
+                "node_position": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "[X, Y] position in the graph",
+                },
+                "graph_name": {
+                    "type": "string",
+                    "description": "Target graph (default: EventGraph)",
+                },
+                "pin_defaults": {
+                    "type": "object",
+                    "description": "Object mapping pin_name -> default_value string",
+                },
+            },
+            "required": ["blueprint_name", "spawner_id"],
+        },
+        examples=(
+            {"blueprint_name": "BP_Player", "spawner_id": "sp_42", "node_position": [300, 0]},
+            {
+                "blueprint_name": "WBP_Weather",
+                "spawner_id": "sp_7",
+                "node_position": [500, 100],
+                "pin_defaults": {"URL": "https://api.example.com"},
+            },
+        ),
+    ),
+    ActionDef(
+        id="node.suggest_next",
+        command="suggest_next",
+        tags=("node", "suggest", "context", "pin", "compatible", "next", "self-evolution"),
+        description=(
+            "Given a node pin, suggest compatible nodes that can connect to it. "
+            "Uses UE's native context-sensitive menu system (same as right-click drag from pin). "
+            "Returns spawner_id for each suggestion, usable with node.add_generic."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "blueprint_name": {
+                    "type": "string",
+                    "description": "Name of the target Blueprint",
+                },
+                "node_id": {
+                    "type": "string",
+                    "description": "GUID of the source node",
+                },
+                "pin_name": {
+                    "type": "string",
+                    "description": "Name of the pin to find compatible connections for",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max results (default: 30, max: 100)",
+                },
+                "graph_name": {
+                    "type": "string",
+                    "description": "Target graph (default: EventGraph)",
+                },
+            },
+            "required": ["blueprint_name", "node_id", "pin_name"],
+        },
+        examples=(
+            {
+                "blueprint_name": "BP_Player",
+                "node_id": "A1B2C3D4-...",
+                "pin_name": "ReturnValue",
+            },
+            {
+                "blueprint_name": "WBP_Weather",
+                "node_id": "E5F6A7B8-...",
+                "pin_name": "OnSuccess",
+                "max_results": 20,
+            },
+        ),
     ),
 ]

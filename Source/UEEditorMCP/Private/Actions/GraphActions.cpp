@@ -28,6 +28,9 @@
 #include "K2Node_Knot.h"
 #include "K2Node_CreateDelegate.h"
 #include "K2Node_ExecutionSequence.h"
+#include "K2Node_InputAction.h"
+#include "K2Node_FormatText.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "EdGraphUtilities.h"
@@ -1325,10 +1328,173 @@ FPatchOpResult FApplyPatchAction::ExecuteAddNode(const FPatchOp& Op, UBlueprint*
 
 		CreatedNode = DelegateNode;
 	}
+	// ---- OPT-2: New special node types ----
+	else if (NodeType.Equals(TEXT("Delay"), ESearchCase::IgnoreCase))
+	{
+		// Create Delay as a proper latent function call via KismetSystemLibrary::Delay
+		UFunction* DelayFunc = UKismetSystemLibrary::StaticClass()->FindFunctionByName(TEXT("Delay"));
+		if (!DelayFunc)
+		{
+			Result.bSuccess = false;
+			Result.Message = TEXT("Delay function not found in KismetSystemLibrary");
+			return Result;
+		}
+
+		UK2Node_CallFunction* FuncNode = NewObject<UK2Node_CallFunction>(Graph);
+		FuncNode->SetFromFunction(DelayFunc);
+		FuncNode->NodePosX = Position.X;
+		FuncNode->NodePosY = Position.Y;
+		Graph->AddNode(FuncNode, false, false);
+		FuncNode->AllocateDefaultPins();
+
+		// Set Duration default if provided
+		double Duration = 0.0;
+		if (Op.Params->TryGetNumberField(TEXT("duration"), Duration))
+		{
+			UEdGraphPin* DurationPin = FMCPCommonUtils::FindPin(FuncNode, TEXT("Duration"), EGPD_Input);
+			if (DurationPin)
+			{
+				DurationPin->DefaultValue = FString::SanitizeFloat(Duration);
+			}
+		}
+
+		CreatedNode = FuncNode;
+	}
+	else if (NodeType.Equals(TEXT("CreateWidget"), ESearchCase::IgnoreCase))
+	{
+		// K2Node_CreateWidget is in a Private header, so we find and spawn it by class name
+		UClass* CreateWidgetClass = FindFirstObject<UClass>(TEXT("K2Node_CreateWidget"), EFindFirstObjectOptions::None);
+		if (!CreateWidgetClass)
+		{
+			// Fallback: scan loaded classes
+			for (TObjectIterator<UClass> It; It; ++It)
+			{
+				if (It->GetName() == TEXT("K2Node_CreateWidget"))
+				{
+					CreateWidgetClass = *It;
+					break;
+				}
+			}
+		}
+		if (!CreateWidgetClass)
+		{
+			Result.bSuccess = false;
+			Result.Message = TEXT("K2Node_CreateWidget class not found. Is the UMGEditor module loaded?");
+			return Result;
+		}
+
+		UK2Node* WidgetNode = Cast<UK2Node>(NewObject<UEdGraphNode>(Graph, CreateWidgetClass));
+		if (!WidgetNode)
+		{
+			Result.bSuccess = false;
+			Result.Message = TEXT("Failed to create CreateWidget node");
+			return Result;
+		}
+		WidgetNode->NodePosX = Position.X;
+		WidgetNode->NodePosY = Position.Y;
+		Graph->AddNode(WidgetNode, false, false);
+		WidgetNode->AllocateDefaultPins();
+
+		// Optionally set the widget class via the "Class" pin
+		FString ClassName;
+		if (Op.Params->TryGetStringField(TEXT("class_name"), ClassName) && !ClassName.IsEmpty())
+		{
+			UClass* WidgetClass = StaticLoadClass(UObject::StaticClass(), nullptr, *ClassName);
+			if (WidgetClass)
+			{
+				UEdGraphPin* ClassPin = FMCPCommonUtils::FindPin(WidgetNode, TEXT("Class"), EGPD_Input);
+				if (ClassPin)
+				{
+					const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+					K2Schema->TrySetDefaultObject(*ClassPin, WidgetClass);
+					WidgetNode->ReconstructNode();
+				}
+			}
+		}
+
+		CreatedNode = WidgetNode;
+	}
+	else if (NodeType.Equals(TEXT("InputAction"), ESearchCase::IgnoreCase))
+	{
+		FString ActionName;
+		if (!Op.Params->TryGetStringField(TEXT("action_name"), ActionName) || ActionName.IsEmpty())
+		{
+			Result.bSuccess = false;
+			Result.Message = TEXT("add_node(InputAction): 'action_name' is required");
+			return Result;
+		}
+
+		UK2Node_InputAction* InputNode = FEdGraphSchemaAction_K2NewNode::SpawnNode<UK2Node_InputAction>(
+			Graph, Position, EK2NewNodeFlags::None,
+			[&ActionName](UK2Node_InputAction* Node)
+			{
+				Node->InputActionName = FName(*ActionName);
+			}
+		);
+		if (!InputNode)
+		{
+			Result.bSuccess = false;
+			Result.Message = TEXT("Failed to create InputAction node");
+			return Result;
+		}
+
+		CreatedNode = InputNode;
+	}
+	else if (NodeType.Equals(TEXT("FormatText"), ESearchCase::IgnoreCase))
+	{
+		UK2Node_FormatText* FormatNode = FEdGraphSchemaAction_K2NewNode::SpawnNode<UK2Node_FormatText>(
+			Graph, Position, EK2NewNodeFlags::None,
+			[](UK2Node_FormatText* Node) {}
+		);
+		if (!FormatNode)
+		{
+			Result.bSuccess = false;
+			Result.Message = TEXT("Failed to create FormatText node");
+			return Result;
+		}
+
+		CreatedNode = FormatNode;
+	}
+	else if (NodeType.Equals(TEXT("SpawnActorFromClass"), ESearchCase::IgnoreCase))
+	{
+		UK2Node_SpawnActorFromClass* SpawnNode = FEdGraphSchemaAction_K2NewNode::SpawnNode<UK2Node_SpawnActorFromClass>(
+			Graph, Position, EK2NewNodeFlags::None,
+			[](UK2Node_SpawnActorFromClass* Node) {}
+		);
+		if (!SpawnNode)
+		{
+			Result.bSuccess = false;
+			Result.Message = TEXT("Failed to create SpawnActorFromClass node");
+			return Result;
+		}
+
+		// Optionally set spawn class
+		FString ClassName;
+		if (Op.Params->TryGetStringField(TEXT("class_name"), ClassName) && !ClassName.IsEmpty())
+		{
+			UClass* SpawnClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::None);
+			if (!SpawnClass)
+			{
+				SpawnClass = StaticLoadClass(UObject::StaticClass(), nullptr, *ClassName);
+			}
+			if (SpawnClass)
+			{
+				UEdGraphPin* ClassPin = SpawnNode->GetClassPin();
+				if (ClassPin)
+				{
+					const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+					K2Schema->TrySetDefaultObject(*ClassPin, SpawnClass);
+					SpawnNode->ReconstructNode();
+				}
+			}
+		}
+
+		CreatedNode = SpawnNode;
+	}
 	else
 	{
 		Result.bSuccess = false;
-		Result.Message = FString::Printf(TEXT("add_node: unsupported node_type '%s'. Supported: Event, CustomEvent, FunctionCall, Branch, Sequence, VariableGet, VariableSet, Cast, Self, Reroute, MacroInstance, CreateDelegate"), *NodeType);
+		Result.Message = FString::Printf(TEXT("add_node: unsupported node_type '%s'. Supported: Event, CustomEvent, FunctionCall, Branch, Sequence, VariableGet, VariableSet, Cast, Self, Reroute, MacroInstance, CreateDelegate, Delay, CreateWidget, InputAction, FormatText, SpawnActorFromClass"), *NodeType);
 		return Result;
 	}
 

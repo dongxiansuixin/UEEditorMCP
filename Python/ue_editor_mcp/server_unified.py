@@ -251,7 +251,7 @@ TOOLS = [
         description=(
             "Execute multiple actions in a SINGLE TCP round-trip via C++ batch_execute. "
             "Much faster than calling ue_actions_run multiple times. "
-            "Stops at first failure unless continue_on_error is true. "
+            "Continues past failures by default; set continue_on_error=false to stop at first failure. "
             f"Max {_MAX_BATCH} actions per batch."
         ),
         inputSchema={
@@ -275,7 +275,7 @@ TOOLS = [
                 },
                 "continue_on_error": {
                     "type": "boolean",
-                    "description": "If true, continue executing after a failure (default: false)",
+                    "description": "If false, stop at first failure (default: true)",
                 },
             },
             "required": ["actions"],
@@ -468,7 +468,7 @@ def _handle_tool(name: str, args: dict) -> Any:
     # instead of N individual TCP calls.
     if name == "ue_batch":
         actions = args.get("actions", [])
-        continue_on_error = args.get("continue_on_error", False)
+        continue_on_error = args.get("continue_on_error", True)
 
         if len(actions) > _MAX_BATCH:
             return {"success": False, "error": f"Max {_MAX_BATCH} actions per batch, got {len(actions)}"}

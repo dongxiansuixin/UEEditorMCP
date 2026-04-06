@@ -186,6 +186,45 @@ static void ApplyCanvasSlot(UCanvasPanelSlot* Slot, const TSharedPtr<FJsonObject
 }
 
 /**
+ * If "parent" parameter is present, reparent the newly created widget
+ * from the root canvas into the specified parent container.
+ * Returns true on success (or if no parent specified). Sets OutError on failure.
+ */
+static bool TryReparentToParent(UWidgetBlueprint* WidgetBlueprint, UWidget* NewWidget,
+	const TSharedPtr<FJsonObject>& Params, FString& OutError)
+{
+	FString ParentName;
+	if (!Params->TryGetStringField(TEXT("parent"), ParentName) || ParentName.IsEmpty())
+	{
+		return true; // No parent specified, keep in root canvas
+	}
+
+	UWidget* ParentWidget = WidgetBlueprint->WidgetTree->FindWidget(FName(*ParentName));
+	if (!ParentWidget)
+	{
+		OutError = FString::Printf(TEXT("Parent widget '%s' not found"), *ParentName);
+		return false;
+	}
+
+	UPanelWidget* ParentPanel = Cast<UPanelWidget>(ParentWidget);
+	if (!ParentPanel)
+	{
+		OutError = FString::Printf(TEXT("Parent '%s' is not a container widget"), *ParentName);
+		return false;
+	}
+
+	NewWidget->RemoveFromParent();
+	UPanelSlot* NewSlot = ParentPanel->AddChild(NewWidget);
+	if (!NewSlot)
+	{
+		OutError = FString::Printf(TEXT("Failed to add widget as child of '%s'"), *ParentName);
+		return false;
+	}
+
+	return true;
+}
+
+/**
  * Repair: populate WidgetVariableNameToGuidMap for any widget missing a GUID entry.
  *
  * Root cause (WBP_DanmakuLayer / WBP_DanmakuItem, 2026-02-19):
@@ -652,6 +691,15 @@ TSharedPtr<FJsonObject> FAddImageToWidgetAction::ExecuteInternal(const TSharedPt
 		ApplyCanvasSlot(ImageSlot, Params);
 	}
 
+	// Optional: reparent into a specified parent container
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Image, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
+
 	// Mark modified, compile, and refresh the Widget Designer
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
@@ -718,6 +766,16 @@ TSharedPtr<FJsonObject> FAddBorderToWidgetAction::ExecuteInternal(const TSharedP
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(Border);
 	ApplyCanvasSlot(Slot, Params);
 
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
+
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
 
@@ -772,6 +830,16 @@ TSharedPtr<FJsonObject> FAddOverlayToWidgetAction::ExecuteInternal(const TShared
 
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(Overlay);
 	ApplyCanvasSlot(Slot, Params);
+
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
 
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
@@ -828,6 +896,16 @@ TSharedPtr<FJsonObject> FAddHorizontalBoxToWidgetAction::ExecuteInternal(const T
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(HorizontalBox);
 	ApplyCanvasSlot(Slot, Params);
 
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
+
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
 
@@ -882,6 +960,16 @@ TSharedPtr<FJsonObject> FAddVerticalBoxToWidgetAction::ExecuteInternal(const TSh
 
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(VerticalBox);
 	ApplyCanvasSlot(Slot, Params);
+
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
 
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
@@ -943,6 +1031,16 @@ TSharedPtr<FJsonObject> FAddSliderToWidgetAction::ExecuteInternal(const TSharedP
 
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(Slider);
 	ApplyCanvasSlot(Slot, Params);
+
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
 
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
@@ -1011,6 +1109,16 @@ TSharedPtr<FJsonObject> FAddProgressBarToWidgetAction::ExecuteInternal(const TSh
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(ProgressBar);
 	ApplyCanvasSlot(Slot, Params);
 
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
+
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
 
@@ -1073,6 +1181,16 @@ TSharedPtr<FJsonObject> FAddSizeBoxToWidgetAction::ExecuteInternal(const TShared
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(SizeBox);
 	ApplyCanvasSlot(Slot, Params);
 
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
+
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
 
@@ -1128,6 +1246,16 @@ TSharedPtr<FJsonObject> FAddScaleBoxToWidgetAction::ExecuteInternal(const TShare
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(ScaleBox);
 	ApplyCanvasSlot(Slot, Params);
 
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
+
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
 
@@ -1182,6 +1310,16 @@ TSharedPtr<FJsonObject> FAddCanvasPanelToWidgetAction::ExecuteInternal(const TSh
 
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(CanvasPanel);
 	ApplyCanvasSlot(Slot, Params);
+
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
 
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
@@ -1259,6 +1397,16 @@ TSharedPtr<FJsonObject> FAddComboBoxToWidgetAction::ExecuteInternal(const TShare
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(ComboBox);
 	ApplyCanvasSlot(Slot, Params);
 
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
+
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
 
@@ -1332,6 +1480,16 @@ TSharedPtr<FJsonObject> FAddCheckBoxToWidgetAction::ExecuteInternal(const TShare
 
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(CheckBox);
 	ApplyCanvasSlot(Slot, Params);
+
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
 
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
@@ -1412,6 +1570,16 @@ TSharedPtr<FJsonObject> FAddSpinBoxToWidgetAction::ExecuteInternal(const TShared
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(SpinBox);
 	ApplyCanvasSlot(Slot, Params);
 
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
+
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
 
@@ -1484,6 +1652,16 @@ TSharedPtr<FJsonObject> FAddEditableTextBoxToWidgetAction::ExecuteInternal(const
 
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(TextBox);
 	ApplyCanvasSlot(Slot, Params);
+
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
 
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
@@ -3309,6 +3487,16 @@ TSharedPtr<FJsonObject> FAddGenericWidgetAction::ExecuteInternal(const TSharedPt
 	UCanvasPanelSlot* Slot = RootCanvas->AddChildToCanvas(NewWidget);
 	ApplyCanvasSlot(Slot, Params);
 
+	// Optional: reparent into a specified parent container
+	if (Slot && Slot->Content)
+	{
+		FString ReparentError;
+		if (!TryReparentToParent(WidgetBlueprint, Slot->Content, Params, ReparentError))
+		{
+			return FMCPCommonUtils::CreateErrorResponse(ReparentError);
+		}
+	}
+
 	WidgetBlueprint->MarkPackageDirty();
 	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
 
@@ -4011,5 +4199,69 @@ TSharedPtr<FJsonObject> FMVVMRemoveViewModelAction::ExecuteInternal(const TShare
 	ResultObj->SetBoolField(TEXT("success"), true);
 	ResultObj->SetStringField(TEXT("removed_viewmodel_name"), ViewModelName);
 	ResultObj->SetStringField(TEXT("removed_viewmodel_id"), TargetId.ToString());
+	return ResultObj;
+}
+
+
+// ============================================================================
+// Set bIsVariable on a widget component
+// ============================================================================
+
+bool FSetWidgetIsVariableAction::Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError)
+{
+	FString WidgetBPName, TargetName;
+	if (!GetRequiredString(Params, TEXT("widget_name"), WidgetBPName, OutError)) return false;
+	if (!GetRequiredString(Params, TEXT("target"), TargetName, OutError)) return false;
+	return true;
+}
+
+TSharedPtr<FJsonObject> FSetWidgetIsVariableAction::ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context)
+{
+	FString WidgetBPName = Params->GetStringField(TEXT("widget_name"));
+	FString TargetName = Params->GetStringField(TEXT("target"));
+	bool bIsVariable = true;
+	if (Params->HasField(TEXT("is_variable")))
+	{
+		bIsVariable = Params->GetBoolField(TEXT("is_variable"));
+	}
+
+	UWidgetBlueprint* WidgetBlueprint = FindWidgetBlueprintByName(WidgetBPName);
+	if (!WidgetBlueprint)
+	{
+		return FMCPCommonUtils::CreateErrorResponse(FString::Printf(
+			TEXT("Widget Blueprint '%s' not found"), *WidgetBPName));
+	}
+
+	if (!WidgetBlueprint->WidgetTree)
+	{
+		return FMCPCommonUtils::CreateErrorResponse(TEXT("Widget Blueprint has no WidgetTree"));
+	}
+
+	// Find the target widget
+	UWidget* TargetWidget = nullptr;
+	WidgetBlueprint->WidgetTree->ForEachWidget([&](UWidget* Widget)
+	{
+		if (Widget && Widget->GetName() == TargetName)
+		{
+			TargetWidget = Widget;
+		}
+	});
+
+	if (!TargetWidget)
+	{
+		return FMCPCommonUtils::CreateErrorResponse(FString::Printf(
+			TEXT("Widget '%s' not found in '%s'"), *TargetName, *WidgetBPName));
+	}
+
+	TargetWidget->bIsVariable = bIsVariable;
+
+	WidgetBlueprint->MarkPackageDirty();
+	MarkWidgetBlueprintDirty(WidgetBlueprint, Context);
+
+	TSharedPtr<FJsonObject> ResultObj = MakeShared<FJsonObject>();
+	ResultObj->SetStringField(TEXT("widget_name"), WidgetBPName);
+	ResultObj->SetStringField(TEXT("target"), TargetName);
+	ResultObj->SetBoolField(TEXT("is_variable"), bIsVariable);
+	ResultObj->SetBoolField(TEXT("success"), true);
 	return ResultObj;
 }

@@ -505,3 +505,18 @@ protected:
 	virtual bool Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError) override;
 	virtual TSharedPtr<FJsonObject> ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context) override;
 };
+
+
+/**
+ * Set bIsVariable on a widget component in a Widget Blueprint.
+ * Params: widget_name, target (widget component name), is_variable (bool)
+ */
+class UEEDITORMCP_API FSetWidgetIsVariableAction : public FEditorAction
+{
+public:
+	virtual FString GetActionName() const override { return TEXT("set_widget_is_variable"); }
+
+protected:
+	virtual bool Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError) override;
+	virtual TSharedPtr<FJsonObject> ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context) override;
+};

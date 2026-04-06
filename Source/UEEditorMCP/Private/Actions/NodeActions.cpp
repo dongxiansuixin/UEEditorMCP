@@ -57,6 +57,12 @@
 #include "GraphEditorActions.h"
 #include "MCPBridge.h"
 #include "GraphEditor.h"
+// Self-Evolution includes
+#include "BlueprintActionDatabase.h"
+#include "BlueprintNodeSpawner.h"
+#include "BlueprintActionMenuBuilder.h"
+#include "BlueprintActionMenuUtils.h"
+#include "BlueprintActionMenuItem.h"
 
 // ============================================================================
 // Graph Operations (connect, find, delete, inspect)
@@ -5239,5 +5245,588 @@ TSharedPtr<FJsonObject> FGetSelectedNodesAction::ExecuteInternal(const TSharedPt
 	ResultData->SetNumberField(TEXT("edge_count"), EdgesArray.Num());
 	ResultData->SetArrayField(TEXT("nodes"), NodesArray);
 	ResultData->SetArrayField(TEXT("edges"), EdgesArray);
+	return CreateSuccessResponse(ResultData);
+}
+
+
+// ============================================================================
+// Async Action Nodes (Third-party plugin support: UForge, etc.)
+// ============================================================================
+
+#include "Kismet/BlueprintAsyncActionBase.h"
+#include "K2Node_AsyncAction.h"
+
+UClass* FAddAsyncActionNodeAction::FindAsyncActionClass(const FString& ClassName) const
+{
+	// Try exact match first via iteration (ANY_PACKAGE removed in UE 5.7)
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+		UClass* TestClass = *It;
+		if (TestClass && TestClass->GetName() == ClassName
+			&& TestClass->IsChildOf(UBlueprintAsyncActionBase::StaticClass()))
+		{
+			return TestClass;
+		}
+	}
+
+	// Fuzzy search: partial name match
+	for (TObjectIterator<UClass> It; It; ++It)
+	{
+		UClass* TestClass = *It;
+		if (TestClass && TestClass->IsChildOf(UBlueprintAsyncActionBase::StaticClass()))
+		{
+			if (TestClass->GetName().Contains(ClassName))
+			{
+				return TestClass;
+			}
+		}
+	}
+
+	return nullptr;
+}
+
+UFunction* FAddAsyncActionNodeAction::FindFactoryFunction(UClass* AsyncClass, const FString& FunctionName) const
+{
+	if (!FunctionName.IsEmpty())
+	{
+		return AsyncClass->FindFunctionByName(FName(*FunctionName));
+	}
+
+	// Auto-detect: find the first static function that returns an object of this class
+	for (TFieldIterator<UFunction> It(AsyncClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
+	{
+		UFunction* Func = *It;
+		if (Func && Func->HasAnyFunctionFlags(FUNC_Static | FUNC_BlueprintCallable))
+		{
+			FObjectPropertyBase* ReturnProp = nullptr;
+			for (TFieldIterator<FProperty> PropIt(Func); PropIt; ++PropIt)
+			{
+				if (PropIt->HasAnyPropertyFlags(CPF_ReturnParm))
+				{
+					ReturnProp = CastField<FObjectPropertyBase>(*PropIt);
+					break;
+				}
+			}
+			if (ReturnProp && ReturnProp->PropertyClass && AsyncClass->IsChildOf(ReturnProp->PropertyClass))
+			{
+				return Func;
+			}
+		}
+	}
+
+	return nullptr;
+}
+
+bool FAddAsyncActionNodeAction::Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError)
+{
+	FString ClassName;
+	if (!GetRequiredString(Params, TEXT("class_name"), ClassName, OutError)) return false;
+	return ValidateGraph(Params, Context, OutError);
+}
+
+TSharedPtr<FJsonObject> FAddAsyncActionNodeAction::ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context)
+{
+	FString ClassName = Params->GetStringField(TEXT("class_name"));
+	FString FactoryFunctionName = GetOptionalString(Params, TEXT("factory_function"));
+	FVector2D Position = GetNodePosition(Params);
+
+	UBlueprint* Blueprint = GetTargetBlueprint(Params, Context);
+	UEdGraph* TargetGraph = GetTargetGraph(Params, Context);
+
+	// Find the async action class
+	UClass* AsyncClass = FindAsyncActionClass(ClassName);
+	if (!AsyncClass)
+	{
+		// List available async action classes for helpful error
+		TArray<FString> AvailableClasses;
+		for (TObjectIterator<UClass> It; It; ++It)
+		{
+			UClass* TestClass = *It;
+			if (TestClass && TestClass->IsChildOf(UBlueprintAsyncActionBase::StaticClass())
+				&& !TestClass->HasAnyClassFlags(CLASS_Abstract))
+			{
+				AvailableClasses.Add(TestClass->GetName());
+			}
+		}
+		AvailableClasses.Sort();
+
+		FString AvailableStr;
+		int32 Count = FMath::Min(AvailableClasses.Num(), 20);
+		for (int32 i = 0; i < Count; ++i)
+		{
+			if (i > 0) AvailableStr += TEXT(", ");
+			AvailableStr += AvailableClasses[i];
+		}
+		if (AvailableClasses.Num() > 20)
+		{
+			AvailableStr += FString::Printf(TEXT(" ... and %d more"), AvailableClasses.Num() - 20);
+		}
+
+		return CreateErrorResponse(FString::Printf(
+			TEXT("Async action class '%s' not found. Available: [%s]"),
+			*ClassName, *AvailableStr));
+	}
+
+	// Find the factory function
+	UFunction* FactoryFunction = FindFactoryFunction(AsyncClass, FactoryFunctionName);
+	if (!FactoryFunction)
+	{
+		TArray<FString> AvailableFunctions;
+		for (TFieldIterator<UFunction> It(AsyncClass, EFieldIteratorFlags::IncludeSuper); It; ++It)
+		{
+			UFunction* Func = *It;
+			if (Func && Func->HasAnyFunctionFlags(FUNC_Static | FUNC_BlueprintCallable))
+			{
+				AvailableFunctions.Add(Func->GetName());
+			}
+		}
+		FString AvailableStr = FString::Join(AvailableFunctions, TEXT(", "));
+		return CreateErrorResponse(FString::Printf(
+			TEXT("Factory function not found on class '%s'. Available static functions: [%s]"),
+			*AsyncClass->GetName(), *AvailableStr));
+	}
+
+	// Spawn the UK2Node_AsyncAction using the public InitializeProxyFromFunction API
+	UK2Node_AsyncAction* AsyncNode = FEdGraphSchemaAction_K2NewNode::SpawnNode<UK2Node_AsyncAction>(
+		TargetGraph,
+		Position,
+		EK2NewNodeFlags::None,
+		[FactoryFunction](UK2Node_AsyncAction* Node)
+		{
+			Node->InitializeProxyFromFunction(FactoryFunction);
+		}
+	);
+
+	if (!AsyncNode)
+	{
+		return CreateErrorResponse(TEXT("Failed to create async action node"));
+	}
+
+	// Set pin defaults if provided
+	const TSharedPtr<FJsonObject>* PinDefaults = nullptr;
+	if (Params->TryGetObjectField(TEXT("pin_defaults"), PinDefaults) && PinDefaults && (*PinDefaults).IsValid())
+	{
+		for (const auto& Pair : (*PinDefaults)->Values)
+		{
+			UEdGraphPin* Pin = FMCPCommonUtils::FindPin(AsyncNode, Pair.Key, EGPD_Input);
+			if (Pin)
+			{
+				FString Value = Pair.Value->AsString();
+				Pin->DefaultValue = Value;
+			}
+		}
+	}
+
+	MarkBlueprintModified(Blueprint, Context);
+	RegisterCreatedNode(AsyncNode, Context);
+
+	// Build response with all pin info
+	TSharedPtr<FJsonObject> ResultData = MakeShared<FJsonObject>();
+	ResultData->SetStringField(TEXT("node_id"), AsyncNode->NodeGuid.ToString());
+	ResultData->SetStringField(TEXT("class_name"), AsyncClass->GetName());
+	ResultData->SetStringField(TEXT("factory_function"), FactoryFunction->GetName());
+
+	TArray<TSharedPtr<FJsonValue>> PinsArray;
+	for (UEdGraphPin* Pin : AsyncNode->Pins)
+	{
+		if (Pin && !Pin->bHidden)
+		{
+			TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
+			PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
+			PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
+			PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
+			if (!Pin->DefaultValue.IsEmpty())
+			{
+				PinObj->SetStringField(TEXT("default_value"), Pin->DefaultValue);
+			}
+			PinsArray.Add(MakeShared<FJsonValueObject>(PinObj));
+		}
+	}
+	ResultData->SetArrayField(TEXT("pins"), PinsArray);
+
+	return CreateSuccessResponse(ResultData);
+}
+
+
+// ============================================================================
+// Self-Evolution: Dynamic Node Discovery & Creation
+// ============================================================================
+
+// Spawner cache — maps string IDs to weak pointers for add_generic_node
+namespace SelfEvolution
+{
+	static TMap<FString, TWeakObjectPtr<UBlueprintNodeSpawner>> SpawnerCache;
+	static int32 NextSpawnerId = 0;
+
+	static FString CacheSpawner(UBlueprintNodeSpawner* Spawner)
+	{
+		// Return existing ID if already cached
+		for (const auto& Pair : SpawnerCache)
+		{
+			if (Pair.Value.Get() == Spawner)
+				return Pair.Key;
+		}
+		FString Id = FString::Printf(TEXT("sp_%d"), NextSpawnerId++);
+		SpawnerCache.Add(Id, Spawner);
+		return Id;
+	}
+
+	static UBlueprintNodeSpawner* LookupSpawner(const FString& SpawnerId)
+	{
+		auto* Found = SpawnerCache.Find(SpawnerId);
+		if (Found && Found->IsValid())
+			return Found->Get();
+		return nullptr;
+	}
+
+	static void CleanCache()
+	{
+		TArray<FString> Expired;
+		for (const auto& Pair : SpawnerCache)
+		{
+			if (!Pair.Value.IsValid())
+				Expired.Add(Pair.Key);
+		}
+		for (const FString& Key : Expired)
+			SpawnerCache.Remove(Key);
+
+		// Hard limit to prevent unbounded growth
+		if (SpawnerCache.Num() > 5000)
+		{
+			SpawnerCache.Empty();
+			NextSpawnerId = 0;
+		}
+	}
+}
+
+// --- search_catalog ---
+
+bool FSearchCatalogAction::Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError)
+{
+	FString Keyword;
+	if (!GetRequiredString(Params, TEXT("keyword"), Keyword, OutError)) return false;
+	if (Keyword.Len() < 2)
+	{
+		OutError = TEXT("keyword must be at least 2 characters");
+		return false;
+	}
+	return true;
+}
+
+TSharedPtr<FJsonObject> FSearchCatalogAction::ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context)
+{
+	FString Keyword = Params->GetStringField(TEXT("keyword"));
+	int32 MaxResults = (int32)GetOptionalNumber(Params, TEXT("max_results"), 50.0);
+	FString CategoryFilter = GetOptionalString(Params, TEXT("category"));
+	MaxResults = FMath::Clamp(MaxResults, 1, 200);
+
+	SelfEvolution::CleanCache();
+
+	FBlueprintActionDatabase& DB = FBlueprintActionDatabase::Get();
+	FBlueprintActionDatabase::FActionRegistry const& AllActions = DB.GetAllActions();
+
+	TArray<TSharedPtr<FJsonValue>> Results;
+	FString KeywordLower = Keyword.ToLower();
+	FString CategoryLower = CategoryFilter.ToLower();
+
+	for (const auto& Pair : AllActions)
+	{
+		const FBlueprintActionDatabase::FActionList& SpawnerList = Pair.Value;
+
+		for (int32 i = 0; i < SpawnerList.Num(); ++i)
+		{
+			UBlueprintNodeSpawner* Spawner = SpawnerList[i];
+			if (!Spawner || !Spawner->NodeClass)
+				continue;
+
+			// Get UI spec (uses cached template if already primed)
+			FBlueprintActionUiSpec const& UiSpec = Spawner->PrimeDefaultUiSpec();
+
+			FString MenuName = UiSpec.MenuName.ToString();
+			if (MenuName.IsEmpty())
+				continue; // Skip hidden/internal actions
+
+			FString Category = UiSpec.Category.ToString();
+			FString Keywords = UiSpec.Keywords.ToString();
+			FString Tooltip = UiSpec.Tooltip.ToString();
+			FString NodeClassName = Spawner->NodeClass ? Spawner->NodeClass->GetName() : TEXT("");
+
+			// Keyword match (case insensitive) — searches MenuName, Category, Keywords, Tooltip, and NodeClass name
+			bool bMatch = MenuName.ToLower().Contains(KeywordLower)
+				|| Category.ToLower().Contains(KeywordLower)
+				|| Keywords.ToLower().Contains(KeywordLower)
+				|| Tooltip.ToLower().Contains(KeywordLower)
+				|| NodeClassName.ToLower().Contains(KeywordLower);
+
+			if (!bMatch)
+				continue;
+
+			// Category filter
+			if (!CategoryLower.IsEmpty() && !Category.ToLower().Contains(CategoryLower))
+				continue;
+
+			// Cache the spawner for later use with add_generic
+			FString SpawnerId = SelfEvolution::CacheSpawner(Spawner);
+
+			// Build result item
+			TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+			Item->SetStringField(TEXT("spawner_id"), SpawnerId);
+			Item->SetStringField(TEXT("name"), MenuName);
+			Item->SetStringField(TEXT("category"), Category);
+			Item->SetStringField(TEXT("node_class"), Spawner->NodeClass->GetName());
+			if (!Keywords.IsEmpty())
+				Item->SetStringField(TEXT("keywords"), Keywords);
+			if (!UiSpec.Tooltip.IsEmpty())
+				Item->SetStringField(TEXT("tooltip"), UiSpec.Tooltip.ToString());
+
+			Results.Add(MakeShared<FJsonValueObject>(Item));
+			if (Results.Num() >= MaxResults)
+				break;
+		}
+		if (Results.Num() >= MaxResults)
+			break;
+	}
+
+	TSharedPtr<FJsonObject> ResultData = MakeShared<FJsonObject>();
+	ResultData->SetArrayField(TEXT("results"), Results);
+	ResultData->SetNumberField(TEXT("count"), (double)Results.Num());
+	return CreateSuccessResponse(ResultData);
+}
+
+
+// --- add_generic_node ---
+
+bool FAddGenericNodeAction::Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError)
+{
+	FString SpawnerId;
+	if (!GetRequiredString(Params, TEXT("spawner_id"), SpawnerId, OutError)) return false;
+	return ValidateGraph(Params, Context, OutError);
+}
+
+TSharedPtr<FJsonObject> FAddGenericNodeAction::ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context)
+{
+	FString SpawnerId = Params->GetStringField(TEXT("spawner_id"));
+	FVector2D Position = GetNodePosition(Params);
+
+	UBlueprintNodeSpawner* Spawner = SelfEvolution::LookupSpawner(SpawnerId);
+	if (!Spawner)
+	{
+		return CreateErrorResponse(TEXT("Spawner not found or expired. Run node.search_catalog again to get a fresh spawner_id."));
+	}
+
+	UBlueprint* Blueprint = GetTargetBlueprint(Params, Context);
+	UEdGraph* TargetGraph = GetTargetGraph(Params, Context);
+
+	if (!Blueprint || !TargetGraph)
+		return CreateErrorResponse(TEXT("Blueprint or graph not found"));
+
+	// Spawn the node using the universal UBlueprintNodeSpawner::Invoke API
+	IBlueprintNodeBinder::FBindingSet EmptyBindings;
+	UEdGraphNode* NewNode = Spawner->Invoke(TargetGraph, EmptyBindings, Position);
+
+	if (!NewNode)
+		return CreateErrorResponse(TEXT("Failed to spawn node. The spawner may not be compatible with this graph type."));
+
+	// Set pin defaults if provided — use Schema API for proper notifications
+	const TSharedPtr<FJsonObject>* PinDefaults = nullptr;
+	if (Params->TryGetObjectField(TEXT("pin_defaults"), PinDefaults) && PinDefaults && (*PinDefaults).IsValid())
+	{
+		const UEdGraphSchema_K2* K2Schema = GetDefault<UEdGraphSchema_K2>();
+		for (const auto& PinPair : (*PinDefaults)->Values)
+		{
+			UEdGraphPin* Pin = FMCPCommonUtils::FindPin(NewNode, PinPair.Key, EGPD_Input);
+			if (!Pin) continue;
+
+			FString Value = PinPair.Value->AsString();
+			const FName& PinCategory = Pin->PinType.PinCategory;
+
+			// Handle object/class pins via TrySetDefaultObject
+			if (PinCategory == UEdGraphSchema_K2::PC_Object ||
+				PinCategory == UEdGraphSchema_K2::PC_Class ||
+				PinCategory == UEdGraphSchema_K2::PC_SoftObject ||
+				PinCategory == UEdGraphSchema_K2::PC_SoftClass)
+			{
+				if (!Value.IsEmpty())
+				{
+					UObject* Obj = StaticLoadObject(UObject::StaticClass(), nullptr, *Value);
+					if (Obj)
+					{
+						K2Schema->TrySetDefaultObject(*Pin, Obj);
+					}
+					else
+					{
+						Pin->DefaultValue = Value;
+					}
+				}
+			}
+			else
+			{
+				// Use schema to set default — triggers proper pin notifications
+				K2Schema->TrySetDefaultValue(*Pin, Value);
+			}
+		}
+		// Some nodes need reconstruction after pin defaults change
+		NewNode->ReconstructNode();
+		TargetGraph->NotifyGraphChanged();
+	}
+
+	MarkBlueprintModified(Blueprint, Context);
+	RegisterCreatedNode(NewNode, Context);
+
+	// Build response with node info and all pins
+	TSharedPtr<FJsonObject> ResultData = MakeShared<FJsonObject>();
+	ResultData->SetStringField(TEXT("node_id"), NewNode->NodeGuid.ToString());
+	ResultData->SetStringField(TEXT("node_class"), NewNode->GetClass()->GetName());
+	ResultData->SetStringField(TEXT("node_title"), NewNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+
+	TArray<TSharedPtr<FJsonValue>> PinsArray;
+	for (UEdGraphPin* Pin : NewNode->Pins)
+	{
+		if (Pin && !Pin->bHidden)
+		{
+			TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
+			PinObj->SetStringField(TEXT("name"), Pin->PinName.ToString());
+			PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
+			PinObj->SetStringField(TEXT("type"), Pin->PinType.PinCategory.ToString());
+			if (!Pin->DefaultValue.IsEmpty())
+			{
+				PinObj->SetStringField(TEXT("default_value"), Pin->DefaultValue);
+			}
+			PinsArray.Add(MakeShared<FJsonValueObject>(PinObj));
+		}
+	}
+	ResultData->SetArrayField(TEXT("pins"), PinsArray);
+
+	return CreateSuccessResponse(ResultData);
+}
+
+
+// --- suggest_next ---
+
+bool FSuggestNextAction::Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError)
+{
+	FString NodeId, PinName;
+	if (!GetRequiredString(Params, TEXT("node_id"), NodeId, OutError)) return false;
+	if (!GetRequiredString(Params, TEXT("pin_name"), PinName, OutError)) return false;
+	return ValidateGraph(Params, Context, OutError);
+}
+
+TSharedPtr<FJsonObject> FSuggestNextAction::ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context)
+{
+	FString NodeIdStr = Params->GetStringField(TEXT("node_id"));
+	FString PinName = Params->GetStringField(TEXT("pin_name"));
+	int32 MaxResults = (int32)GetOptionalNumber(Params, TEXT("max_results"), 30.0);
+	MaxResults = FMath::Clamp(MaxResults, 1, 100);
+
+	UBlueprint* Blueprint = GetTargetBlueprint(Params, Context);
+	UEdGraph* TargetGraph = GetTargetGraph(Params, Context);
+
+	if (!Blueprint || !TargetGraph)
+		return CreateErrorResponse(TEXT("Blueprint or graph not found"));
+
+	// Find the node by GUID
+	FGuid NodeGuid;
+	if (!FGuid::Parse(NodeIdStr, NodeGuid))
+		return CreateErrorResponse(TEXT("Invalid node_id format. Expected a GUID string."));
+
+	UEdGraphNode* SourceNode = nullptr;
+	for (UEdGraphNode* Node : TargetGraph->Nodes)
+	{
+		if (Node && Node->NodeGuid == NodeGuid)
+		{
+			SourceNode = Node;
+			break;
+		}
+	}
+	if (!SourceNode)
+		return CreateErrorResponse(FString::Printf(TEXT("Node '%s' not found in graph"), *NodeIdStr));
+
+	// Find the pin by name
+	UEdGraphPin* SourcePin = nullptr;
+	for (UEdGraphPin* Pin : SourceNode->Pins)
+	{
+		if (Pin && Pin->PinName.ToString() == PinName)
+		{
+			SourcePin = Pin;
+			break;
+		}
+	}
+	if (!SourcePin)
+	{
+		// List available pins for helpful error
+		TArray<FString> PinNames;
+		for (UEdGraphPin* Pin : SourceNode->Pins)
+		{
+			if (Pin && !Pin->bHidden)
+				PinNames.Add(Pin->PinName.ToString());
+		}
+		return CreateErrorResponse(FString::Printf(
+			TEXT("Pin '%s' not found. Available pins: [%s]"),
+			*PinName, *FString::Join(PinNames, TEXT(", "))));
+	}
+
+	// Build context for context-sensitive action menu
+	FBlueprintActionContext FilterContext;
+	FilterContext.Blueprints.Add(Blueprint);
+	FilterContext.Graphs.Add(TargetGraph);
+	FilterContext.Pins.Add(SourcePin);
+
+	// Build context menu using UE's native system (synchronous, no time-slicing)
+	FBlueprintActionMenuBuilder MenuBuilder;
+	FBlueprintActionMenuUtils::MakeContextMenu(
+		FilterContext,
+		/*bIsContextSensitive=*/ true,
+		/*ClassTargetMask=*/ 0,
+		MenuBuilder
+	);
+
+	// Iterate results and build response
+	SelfEvolution::CleanCache();
+	TArray<TSharedPtr<FJsonValue>> Results;
+
+	int32 NumActions = MenuBuilder.GetNumActions();
+	for (int32 i = 0; i < NumActions && Results.Num() < MaxResults; ++i)
+	{
+		TSharedPtr<FEdGraphSchemaAction> Action = MenuBuilder.GetSchemaAction(i);
+		if (!Action.IsValid())
+			continue;
+
+		FString MenuName = Action->GetMenuDescription().ToString();
+		if (MenuName.IsEmpty())
+			continue;
+
+		TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+		Item->SetStringField(TEXT("name"), MenuName);
+		Item->SetStringField(TEXT("category"), Action->GetCategory().ToString());
+
+		// If it's a FBlueprintActionMenuItem, extract spawner info and cache it
+		if (Action->GetTypeId() == FBlueprintActionMenuItem::StaticGetTypeId())
+		{
+			FBlueprintActionMenuItem* MenuItem = static_cast<FBlueprintActionMenuItem*>(Action.Get());
+			UBlueprintNodeSpawner const* RawSpawner = MenuItem->GetRawAction();
+			if (RawSpawner)
+			{
+				Item->SetStringField(TEXT("node_class"),
+					RawSpawner->NodeClass ? RawSpawner->NodeClass->GetName() : TEXT("Unknown"));
+
+				// Cache spawner for add_generic (const_cast is safe: database owns as non-const)
+				UBlueprintNodeSpawner* MutableSpawner = const_cast<UBlueprintNodeSpawner*>(RawSpawner);
+				FString SpawnerId = SelfEvolution::CacheSpawner(MutableSpawner);
+				Item->SetStringField(TEXT("spawner_id"), SpawnerId);
+			}
+		}
+
+		Results.Add(MakeShared<FJsonValueObject>(Item));
+	}
+
+	TSharedPtr<FJsonObject> ResultData = MakeShared<FJsonObject>();
+	ResultData->SetArrayField(TEXT("compatible_actions"), Results);
+	ResultData->SetNumberField(TEXT("count"), (double)Results.Num());
+	ResultData->SetNumberField(TEXT("total_available"), (double)NumActions);
+	ResultData->SetStringField(TEXT("source_pin"), PinName);
+	ResultData->SetStringField(TEXT("pin_direction"),
+		SourcePin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
+	ResultData->SetStringField(TEXT("pin_type"), SourcePin->PinType.PinCategory.ToString());
+
 	return CreateSuccessResponse(ResultData);
 }

@@ -750,6 +750,106 @@ protected:
 
 
 // ============================================================================
+// Async Action Nodes (Third-party plugin support: UForge, etc.)
+// ============================================================================
+
+/** Add an async action node (UK2Node_AsyncAction) by class name.
+ *  Supports any UBlueprintAsyncActionBase subclass, including third-party
+ *  plugins like UForge HTTP & JSON Utility.
+ *
+ *  Params:
+ *    blueprint_name  (required)  Target Blueprint
+ *    class_name      (required)  C++ class name of the async action (e.g. "HTTPProxyAsync")
+ *    factory_function (optional) Factory function name (auto-detected if omitted)
+ *    node_position   (optional)  [X, Y]
+ *    graph_name      (optional)  Target graph (default: EventGraph)
+ *    pin_defaults    (optional)  Object mapping pin_name -> default_value
+ */
+class UEEDITORMCP_API FAddAsyncActionNodeAction : public FBlueprintNodeAction
+{
+public:
+	virtual TSharedPtr<FJsonObject> ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context) override;
+protected:
+	virtual bool Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError) override;
+	virtual FString GetActionName() const override { return TEXT("add_async_action_node"); }
+private:
+	UClass* FindAsyncActionClass(const FString& ClassName) const;
+	UFunction* FindFactoryFunction(UClass* AsyncClass, const FString& FunctionName) const;
+};
+
+
+// ============================================================================
+// Self-Evolution: Dynamic Node Discovery & Creation
+// ============================================================================
+
+/** Search the Blueprint action catalog for available nodes.
+ *  Queries FBlueprintActionDatabase to discover all registered Blueprint actions.
+ *
+ *  Params:
+ *    keyword       (required)  Search term (min 2 chars, matches name/category/keywords)
+ *    category      (optional)  Additional category filter
+ *    max_results   (optional)  Max results to return (default: 50, max: 200)
+ *
+ *  Returns: array of {spawner_id, name, category, node_class, keywords, tooltip}
+ *  Use spawner_id with node.add_generic to create the node.
+ */
+class UEEDITORMCP_API FSearchCatalogAction : public FBlueprintNodeAction
+{
+public:
+	virtual TSharedPtr<FJsonObject> ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context) override;
+protected:
+	virtual bool Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError) override;
+	virtual FString GetActionName() const override { return TEXT("search_catalog"); }
+	virtual bool RequiresSave() const override { return false; }
+};
+
+
+/** Create any Blueprint node using a spawner_id from search_catalog or suggest_next.
+ *  This is the "universal node creator" — replaces 30+ hardcoded node.add_* actions.
+ *
+ *  Params:
+ *    blueprint_name  (required)  Target Blueprint
+ *    spawner_id      (required)  ID from search_catalog or suggest_next
+ *    node_position   (optional)  [X, Y]
+ *    graph_name      (optional)  Target graph (default: EventGraph)
+ *    pin_defaults    (optional)  Object mapping pin_name -> default_value
+ *
+ *  Returns: node_id, node_class, node_title, pins[]
+ */
+class UEEDITORMCP_API FAddGenericNodeAction : public FBlueprintNodeAction
+{
+public:
+	virtual TSharedPtr<FJsonObject> ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context) override;
+protected:
+	virtual bool Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError) override;
+	virtual FString GetActionName() const override { return TEXT("add_generic_node"); }
+};
+
+
+/** Given a node pin, suggest compatible nodes that can connect to it.
+ *  Uses UE's native context-sensitive menu system (FBlueprintActionMenuUtils).
+ *
+ *  Params:
+ *    blueprint_name  (required)  Target Blueprint
+ *    node_id         (required)  GUID of the source node
+ *    pin_name        (required)  Name of the pin to find connections for
+ *    max_results     (optional)  Max results (default: 30, max: 100)
+ *    graph_name      (optional)  Target graph (default: EventGraph)
+ *
+ *  Returns: compatible_actions[], source_pin info, pin_type
+ */
+class UEEDITORMCP_API FSuggestNextAction : public FBlueprintNodeAction
+{
+public:
+	virtual TSharedPtr<FJsonObject> ExecuteInternal(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context) override;
+protected:
+	virtual bool Validate(const TSharedPtr<FJsonObject>& Params, FMCPEditorContext& Context, FString& OutError) override;
+	virtual FString GetActionName() const override { return TEXT("suggest_next"); }
+	virtual bool RequiresSave() const override { return false; }
+};
+
+
+// ============================================================================
 // Graph Topology (P2)
 // ============================================================================
 
